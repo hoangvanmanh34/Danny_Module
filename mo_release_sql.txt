@@ -1,0 +1,486 @@
+USE [COPY_IC]
+GO
+/****** Object:  StoredProcedure [dbo].[usp_ALLPART_MO_Released_Sync]    Script Date: 9/17/2024 6:48:35 AM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+-- =============================================
+-- Author:		<Author,,Name>
+-- Create date: <Create Date,,>
+-- Description:	<Description,,>
+-- =============================================
+ALTER PROCEDURE [dbo].[usp_ALLPART_MO_Released_Sync]
+	@siteName VARCHAR(50)='P06',
+	@date_input varchar(8) ='14092024'
+AS
+BEGIN
+	-- SET NOCOUNT ON added to prevent extra result sets from
+	-- interfering with SELECT statements.
+	SET NOCOUNT ON;
+
+	declare @AppId varchar(50)= 'copyic';
+	--set @siteName = 'VBV'
+
+	--DECLARE @siteName VARCHAR(50)
+	--SET @siteName = 'CBD-HT'
+
+    -- Insert statements for procedure here
+	DECLARE @IP_SERVER VARCHAR(20)
+	SET @IP_SERVER = (SELECT top 1 local_net_address FROM sys.dm_exec_connections WHERE local_net_address LIKE '%10.228.110%')
+	DECLARE @today VARCHAR(8) = REPLACE(CONVERT(VARCHAR, GETDATE(), 103), '/', '')
+	IF(@date_input IS NULL)
+	BEGIN
+		SET @date_input = @today
+	END
+
+	--EXEC sp_configure 'show advanced options', 1;
+	--RECONFIGURE
+	--EXEC sp_configure 'Ole Automation Procedures', 1;
+	--RECONFIGURE
+
+
+	--DECLARE @URL NVARCHAR(MAX) = 'https://ap-cns.myfiinet.com:6443/MESAPI/api/MES/CallAPI';
+	--DECLARE @Object AS INT;
+	--DECLARE @ResponseText AS VARCHAR(8000);
+	--DECLARE @json AS TABLE(Json_Table NVARCHAR(MAX))
+	--DECLARE @Body AS VARCHAR(500) =
+	--'{ 
+	--	"IN_DB" : "SFC_RHEA", 
+	--	"IN_SP" : "SFIS1.COPYIC", 
+	--	"IN_EVENT" : "CHECK_EMP", 
+	--	"IN_DATA" : "{''''EMP_NO:V0916166, EMP_NAME:Han''''}"
+	--}'
+	-----------------------------------------------------------------------
+	--DECLARE @URL NVARCHAR(MAX) = 'http://10.228.110.120:8080/mesapi/api/mes/CallAPI';
+	--DECLARE @Object AS INT;
+	--DECLARE @ResponseText AS VARCHAR(8000);
+	--DECLARE @json AS TABLE(Json_Table NVARCHAR(MAX))
+	--DECLARE @Body AS VARCHAR(500) =
+	--'{ 
+	--	"IN_IP" : '''+@IP_SERVER+''', 
+	--	"IN_DB" : "SFC", 
+	--	"IN_SP" : "SFIS1.COPYIC", 
+	--	"IN_EVENT" : "GET_MO_RELEASED", 
+	--	"IN_DATA" : "{''DATE'':'''+@date_input+'''}"
+	--}'
+
+	--EXEC sp_OACreate 'MSXML2.XMLHTTP', @Object OUT;
+	--EXEC sp_OAMethod @Object, 'open', NULL, 'post',
+	--				 @URL,
+	--				 'false'
+	--EXEC sp_OAMethod @Object, 'setRequestHeader', null, 'Content-Type', 'application/json'
+	--EXEC sp_OAMethod @Object, 'send', null, @body
+	--EXEC sp_OAMethod @Object, 'responseText', @ResponseText OUTPUT
+	--IF CHARINDEX('false',(SELECT @ResponseText)) > 0
+	--BEGIN
+	--	SELECT @ResponseText As 'Message'
+	--END
+	--ELSE
+	--BEGIN
+	--	--SELECT @ResponseText As 'Employee Details'
+	--	INSERT into @json (Json_Table) SELECT @ResponseText
+	--	SELECT * FROM @json
+	--END
+
+	EXEC sp_configure 'show advanced options', 1;
+	RECONFIGURE
+	EXEC sp_configure 'xp_cmdshell', 1;
+	RECONFIGURE
+
+	DECLARE @cmd NVARCHAR(4000);
+	DECLARE @result table (LINE VARCHAR(MAX));
+	DECLARE @json AS TABLE(Json_Table NVARCHAR(MAX))
+
+	SET @cmd = 'D:\\SQL\\copyic\\it_api\\mo_release.exe API_TYPE=0 IN_IP="10.228.30.184" IN_DB="SFC" IN_SP="SFIS1.COPYIC" IN_EVENT="GET_MO_RELEASED" IN_DATA="{''DATE'':'''+@date_input+'''}" DATE="'+@date_input+'"'
+	insert into @result
+	EXEC xp_cmdshell @cmd;
+
+
+	INSERT into @json (Json_Table)
+	select '{'+
+	stuff(
+		(select '' + LINE
+		from @result
+		for xml path('')), 1, 1, ''
+		) + '}'
+	AS RESULT
+	
+	--INSERT into @json (Json_Table) EXEC sp_OADestroy @Object
+
+	DECLARE @my_tb table(
+		MYID int identity,
+		MO varchar(20),
+		MO_COPYIC varchar(20),
+		MODEL_NAME varchar(20)
+	)
+	--select * from @json
+	--SELECT JSON_VALUE(Json_Table, '$.Code') as [CODE],
+	--		JSON_VALUE(Json_Table, '$.Message') as [MESSAGE],
+	--		(select * from @json) AS [RESPONSES]
+	--	FROM @json
+	
+	-------------------CHECK DATA EMPTY OR API ERROR--------------------------------------------
+
+	IF (SELECT JSON_VALUE((SELECT Json_Table FROM @json), '$.Code') as [CODE] FROM @json) != 1 
+	OR (SELECT	JSON_VALUE((SELECT Json_Table FROM @json), '$.Message') as [MESSAGE]) != 'OK'
+	BEGIN
+		RETURN
+	END
+	--------------------------------------
+	DECLARE @data_count INT
+	SET @data_count = (SELECT 
+							COUNT([MO]) AS MO_QTY
+						FROM OPENJSON((SELECT * FROM @json))
+						WITH (
+							[DATA] NVARCHAR(MAX) '$.Data' AS JSON
+						) AS  MetaData
+						CROSS APPLY OPENJSON([DATA])
+						WITH(	
+							[MO] NVARCHAR(MAX)
+
+						) AS ColumnData
+					)
+	IF @data_count <= 0 
+	BEGIN
+		IF(SELECT COUNT(DATA_NAME) FROM DATA_COUNTS WHERE DATA_NAME = 'ALLPART_DATA') > 0
+		BEGIN
+			UPDATE DATA_COUNTS SET COUNT += 1 WHERE DATA_NAME = 'ALLPART_DATA'
+		END
+		ELSE
+		BEGIN
+			INSERT INTO DATA_COUNTS([DATA_NAME], [COUNT]) VALUES('ALLPART_DATA', 1)
+		END
+		---------------------------------------
+		IF(SELECT COUNT(DATA_NAME) FROM DATA_COUNTS WHERE DATA_NAME = 'ALLPART_DATA') > 5
+		BEGIN
+			RETURN
+		END
+
+		RETURN
+
+	END
+	ELSE
+	BEGIN
+		IF(SELECT COUNT(DATA_NAME) FROM DATA_COUNTS WHERE DATA_NAME = 'ALLPART_DATA') > 0
+		BEGIN
+			UPDATE DATA_COUNTS SET COUNT = 0 WHERE DATA_NAME = 'ALLPART_DATA'
+		END
+		ELSE
+		BEGIN
+			INSERT INTO DATA_COUNTS([DATA_NAME], [COUNT]) VALUES('ALLPART_DATA', 0)
+		END
+	END
+
+
+	------------SAVE HISTORY------------------------------
+
+	INSERT INTO MO_RELEASED_LOGS([CODE], [MESSAGE], [RESPONSES])
+		SELECT JSON_VALUE(Json_Table, '$.Code') as [CODE],
+			JSON_VALUE(Json_Table, '$.Message') as [MESSAGE],
+			(select * from @json) AS [RESPONSES]
+		FROM @json
+
+
+	DECLARE @MO_INFORMATIONS_TEMP TABLE (
+		[MO] [VARCHAR](50) NULL,
+		[MO_COPYIC] [VARCHAR](50) NULL,
+		[MO_NUMBER] [VARCHAR](50) NULL,
+		[SITE] [VARCHAR](50) NULL,
+		[MODEL_NAME] [varchar](50) NULL,
+		[PN] [varchar](50) NULL,
+		[WO_QTY] [int] NULL,
+		[WO_REQUEST] [int] NULL,
+		[QTY_ON_PCB] [int] NULL,
+		[QTY] [int] NULL,
+		[DOWNLOAD_TIME] [datetime] NULL
+	)
+
+
+	--------------------
+	INSERT INTO @MO_INFORMATIONS_TEMP(MO, MO_COPYIC, MO_NUMBER, [SITE], MODEL_NAME, PN, WO_QTY, QTY_ON_PCB, QTY, DOWNLOAD_TIME)
+		SELECT 
+			--JSON_VALUE((SELECT Json_Table FROM @json), '$.Code') as [CODE],
+			--JSON_VALUE((SELECT Json_Table FROM @json), '$.Message') as [MESSAGE],
+			[MO],
+			[MO_COPYIC],
+			LEFT([MO_COPYIC], LEN([MO_COPYIC]) - 2) AS MO_NUMBER,
+			@siteName AS [SITE],
+			[MODEL_NAME],
+			[PN],
+			CONVERT(INT, CONVERT(FLOAT, [WO_QTY])) AS [WO_QTY],
+			CONVERT(INT, CONVERT(FLOAT, [QTY])) AS [QTY_ON_PCB],
+			--(CONVERT(INT, CONVERT(FLOAT, [WO_QTY])) * CONVERT(INT, CONVERT(FLOAT, [QTY]))) AS [QTY],
+			CONVERT(INT, CONVERT(FLOAT, [WO_REQUEST])) AS [QTY],
+			TRY_CONVERT(DATETIME, [DOWNLOAD_TIME], 103) AS [DOWNLOAD_TIME]
+		FROM OPENJSON((SELECT * FROM @json))
+		WITH (
+			[CODE] NVARCHAR(MAX) '$.Code',
+			[MESSAGE] NVARCHAR(MAX) '$.Message',
+			[DATA] NVARCHAR(MAX) '$.Data' AS JSON
+		) AS  MetaData
+		CROSS APPLY OPENJSON([DATA])
+		WITH(	
+			[MO] NVARCHAR(MAX),
+			[MO_COPYIC] NVARCHAR(MAX),
+			[MODEL_NAME] NVARCHAR(MAX),
+			[PN] NVARCHAR(MAX),
+			[WO_QTY] NVARCHAR(MAX),
+			[WO_REQUEST] NVARCHAR(MAX),
+			[QTY] NVARCHAR(MAX),
+			[DOWNLOAD_TIME] NVARCHAR(MAX)
+
+		) AS ColumnData
+
+		
+	------------------CHECK IF COPY SW NEEDED---------------------------
+	------------------WILL MODIFY THIS WHEN DOING SW MANAGEMENT
+	--DELETE FROM @MO_INFORMATIONS_TEMP WHERE NOT EXISTS (SELECT MATERIAL_CODE FROM APPLICATIONS aa WHERE MODEL_NAME = MODEL_NAME AND MATERIAL_CODE = [PN])
+	UPDATE @MO_INFORMATIONS_TEMP SET [SITE] = (SELECT TOP 1 sm.[SITE] FROM SOCKET_MODELS sm 
+							INNER JOIN MODELS md
+							ON sm.MODEL_ID = md.MODEL_ID
+				WHERE md.FOX_MODEL_NAME = mot.MODEL_NAME AND sm.PN = mot.PN)
+	FROM @MO_INFORMATIONS_TEMP mot
+	
+	
+	-----------------UPDATE MO INFORMATION FROM ALLPART WHERE ALREADY RELEASED BEFORE--------------------------------------------------
+	DECLARE @mo VARCHAR(50)
+	DECLARE @moCopyic VARCHAR(50)
+	DECLARE @modelName VARCHAR(50)
+	DECLARE @pn VARCHAR(50)
+	DECLARE @wo_qty INT
+	DECLARE @qty_on_pcb INT
+	DECLARE @qty INT
+	DECLARE @downloadTime DATETIME
+	DECLARE @syncTime DATETIME
+	-------------------------------------
+	DECLARE db_cursor CURSOR FOR
+		SELECT 
+			[MO],
+			[MO_COPYIC],
+			[MODEL_NAME],
+			[PN],
+			[WO_QTY],
+			[QTY_ON_PCB],
+			[QTY],
+			TRY_CONVERT(DATETIME, [DOWNLOAD_TIME], 103) AS [DOWNLOAD_TIME],
+			GETDATE() AS [SYNC_TIME]
+		FROM @MO_INFORMATIONS_TEMP motmp
+		WHERE EXISTS (SELECT MO_COPYIC FROM MO_INFORMATIONS moi WHERE moi.MO_COPYIC = motmp.MO_COPYIC)
+		AND EXISTS (SELECT MATERIAL_CODE FROM APPLICATIONS aa WHERE MODEL_NAME = motmp.MODEL_NAME AND MATERIAL_CODE = motmp.[PN])
+
+	OPEN db_cursor
+	FETCH NEXT FROM db_cursor INTO @mo, @moCopyic, @modelName, @pn, @wo_qty, @qty_on_pcb, @qty, @downloadTime, @syncTime
+	
+	WHILE @@FETCH_STATUS = 0
+	BEGIN
+
+
+	--------------------------------------------------------------------------
+	UPDATE MO_INFORMATIONS SET WO_QTY = @wo_qty, QTY_ON_PCB = @qty_on_pcb, QTY = @qty, DOWNLOAD_TIME = @downloadTime, SYNC_TIME = @syncTime
+		WHERE MO = @mo AND MO_COPYIC = @moCopyic AND MODEL_NAME = @modelName AND PN = @pn
+
+		FETCH NEXT FROM db_cursor INTO @mo, @moCopyic, @modelName, @pn, @wo_qty, @qty_on_pcb, @qty, @downloadTime, @syncTime
+	END
+	CLOSE db_cursor
+	DEALLOCATE db_cursor
+
+
+	
+		----------------SEND EMAIL INFORM NEW APP----------------------------------------
+	 declare @MoS varchar(100),  @PartNumberS varchar(100), @QuantityS varchar(100), @ModelNameS varchar(100), @PnQty varchar(100);
+		
+	 DECLARE cur_test CURSOR FAST_FORWARD
+        FOR
+			SELECT 
+				[MO_NUMBER],
+				[MODEL_NAME],
+				[PN],
+				[WO_QTY],
+				[QTY]
+			FROM @MO_INFORMATIONS_TEMP motmp
+			WHERE NOT EXISTS (SELECT MO_COPYIC FROM MO_INFORMATIONS moi WHERE moi.MO_COPYIC = motmp.MO_COPYIC AND moi.MODEL_NAME = motmp.MODEL_NAME AND moi.PN = motmp.[PN])
+			AND EXISTS (SELECT PN FROM PROGRAM_MANAGEMENTS aa WHERE MODEL_NAME = motmp.MODEL_NAME AND PN = motmp.[PN])--Need update from programe management
+
+
+			--select MO_NUMBER, MODEL_NAME, PN, WO_QTY, QTY from MO_INFORMATIONS where MO_INFOR_ID = 203 or MO_INFOR_ID = 204
+
+        OPEN cur_test;
+        FETCH NEXT FROM cur_test INTO @MoS, @ModelNameS,@PartNumberS, @QuantityS, @PnQty;
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+					EXEC [dbo].[usp_SendEmail_Mo_Released]
+					@MoNumber = @MoS,
+					@PartNumber = @PartNumberS,
+					@Quantity = @QuantityS,
+					@ModelName = @ModelNameS,
+					@PnQty = @PnQty
+	   FETCH NEXT FROM cur_test INTO @MoS, @ModelNameS,@PartNumberS, @QuantityS, @PnQty;
+        END;
+        CLOSE cur_test;
+        DEALLOCATE cur_test;
+
+
+	--SELECT * FROM MO_INFORMATIONS
+	-----------------SAVE NEW MO INFORMATION FROM ALLPART--------------------------------------------------
+	INSERT INTO MO_INFORMATIONS(MO_INFOR_ID, MO, MO_COPYIC, MO_NUMBER, [SITE], MODEL_NAME, PN, WO_QTY, QTY_ON_PCB, QTY, PASS_QTY, DOWNLOAD_TIME, SYNC_TIME, CREATED_TIME)
+		SELECT 
+			--JSON_VALUE((SELECT Json_Table FROM @json), '$.Code') as [CODE],
+			--JSON_VALUE((SELECT Json_Table FROM @json), '$.Message') as [MESSAGE],
+			NEXT VALUE FOR [SQ_MO_Released_Sync] AS MO_INFOR_ID,
+			[MO],
+			[MO_COPYIC],
+			[MO_NUMBER],
+			[SITE],
+			[MODEL_NAME],
+			[PN],
+			[WO_QTY],
+			[QTY_ON_PCB],
+			[QTY],
+			0 AS PASS_QTY,
+			[DOWNLOAD_TIME],
+			GETDATE(),
+			GETDATE()
+		FROM @MO_INFORMATIONS_TEMP motmp
+		WHERE NOT EXISTS (SELECT MO_COPYIC FROM MO_INFORMATIONS moi WHERE moi.MO_COPYIC = motmp.MO_COPYIC AND moi.MODEL_NAME = motmp.MODEL_NAME AND moi.PN = motmp.[PN])
+		AND EXISTS (SELECT PN FROM PROGRAM_MANAGEMENTS aa WHERE MODEL_NAME = motmp.MODEL_NAME AND PN = motmp.[PN])--Need update from programe management
+
+
+	----------------SAVE MO WORK ORDER APPLICATION -----------------------------------------------------------
+	INSERT INTO MO_WORK_ORDER_APPS(
+		[MO_WORKORDER_APP_ID],
+		[MO_INFOR_ID],
+		[APP_DELIVERY_COMPLETED],
+		UPDATED_TIME)
+
+		SELECT
+			next value for [SQ_MO_Work_Order_App] AS [MO_WORKORDER_APP_ID],
+			MO_INFOR_ID AS [MO_INFOR_ID],
+			0 AS [APP_DELIVER_COMPLETED],
+			GETDATE()
+		FROM MO_INFORMATIONS moi
+		WHERE MO_INFOR_ID NOT IN (SELECT MO_INFOR_ID FROM MO_WORK_ORDER_APPS)
+		
+		--SELECT * FROM AUTH.DBO.TENANTS
+	
+	UPDATE MO_INFORMATIONS SET TENANT_ID = (SELECT TOP 1 TENANT_ID FROM AUTH.DBO.TENANTS WHERE  APP_ID = @AppId)
+	
+	UPDATE MO_WORK_ORDER_APPS SET TENANT_ID = (SELECT TOP 1 TENANT_ID FROM AUTH.DBO.TENANTS WHERE APP_ID = @AppId)
+
+
+	--------UPDATE MODELS TABLE-------------------------------------------------------
+	INSERT INTO MODELS(FOX_MODEL_NAME, MODEL_ID, [SITE])
+	SELECT
+		md.MODEL_NAME,	
+		NEXT VALUE FOR SQ_Models AS MODEL_ID,
+		@siteName
+	FROM 
+	(
+		SELECT DISTINCT MODEL_NAME	
+		FROM MO_INFORMATIONS
+		WHERE MODEL_NAME NOT IN (SELECT FOX_MODEL_NAME FROM MODELS)
+	) md
+	---------------------------------------------------------------------------------
+
+	------------Calc Copy Schedule--------------------------------
+	EXEC [usp_Report_CopyIC_Automation_Schedule_Main]
+	
+			----------------SEND EMAIL INFORM NEW APP----------------------------------------
+	select 1
+
+	return
+			--declare @PnQty int = @qty_on_pcb*@wo_qty;
+
+			--EXEC [dbo].[usp_SendEmail_Mo_Released]
+			--@MoNumber = @mo,
+			--@PartNumber = @pn,
+			--@Quantity = @wo_qty,
+			--@ModelName = @modelName,
+			--@PnQty = @PnQty
+			
+
+			DECLARE @Subject NVARCHAR(1000) = '';
+			DECLARE @Content NVARCHAR(MAX) = '';
+			DECLARE @ErrorCode NVARCHAR(1000) = '';
+			DECLARE @EmailTo NVARCHAR(2000);
+			DECLARE @EmailCc NVARCHAR(2000);
+			DECLARE @EmailKitting NVARCHAR(500);
+			DECLARE @EmailPE NVARCHAR(500);
+			DECLARE @IdEncrypt NVARCHAR(128);
+			DECLARE @ModelType NVARCHAR(50) = '';
+
+
+
+
+
+			declare @Content1 varchar(500)
+
+			set @Content1 = '<a href="http://localhost:5300/#/copyic/materialorderapp'
+                        + N'">http://localhost:5300/#/copyic/materialorderapp'
+                        + N'</a>';
+
+
+			SET @Subject = N'[E-COPY-IC] New MO Work-Order Application waiting for your confirmation.'
+			SET @Content = N'Dear Kitting & PE' + N', </br></br></br>'+
+							'(-> These applications created by system automation)</br></br>'+
+							'Have new MO Work-Order applications of ' +@siteName+ ' waiting for your confirmation.</br></br>'+
+							'-Please Kitting access E-Copy-IC system to INPUT/CANCEL the MO information..</br></br>'+
+							'-Please PE access E-Copy-IC system to APPROVE/REJECT the sofware information..</br></br>'+
+							'Please copy below URL link to Chrome/Microsoft Edge/Firefox/Chrome to open:.</br></br>'+
+							'Link: ' + @Content1 + '.</br></br>'
+			
+			
+
+			SET @EmailKitting = (select KITTING_OWNER from CONFIRM_MAILS where SITE_NAME = @siteName
+							FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)')
+			SET @EmailPE = (select PE_OWNER from CONFIRM_MAILS where SITE_NAME = @siteName
+							FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)')
+
+			SET @EmailTo = @EmailKitting + ',' + @EmailPE
+
+
+			SET @EmailCc = (select CC_EMAIL from CONFIRM_MAILS)
+
+			--EXEC TOTALLY.dbo.usp_QueueEmail_Insert @EmailQueueId = 0,        -- bigint
+			--									   @EmailTo = @EmailTo,      -- nvarchar(1000)
+			--									   @EmailCc = @EmailCc,      -- nvarchar(1000)
+			--									   @EmailBcc = N'',          -- nvarchar(1000)
+			--									   @EmailSubject = @Subject, -- nvarchar(500)
+			--									   @EmailContent = @Content, -- nvarchar(1000)
+			--									   @Attachment = N'',        -- nvarchar(1000)
+			--									   @CreatedDate = NULL,      -- date
+			--									   @SendStatus = 0,          -- bit
+			--									   @SentDate = NULL,         -- date
+			--									   @IsHtml = 1;
+
+			------------------------------------------------------
+
+
+END
+
+
+#EXEC sp_configure 'show advanced options', 1;
+#RECONFIGURE
+#EXEC sp_configure 'xp_cmdshell', 1;
+#RECONFIGURE
+
+#DECLARE @cmd NVARCHAR(4000);
+#DECLARE @result table (LINE VARCHAR(MAX));
+#SET @cmd = 'D:\\SQL\\copyic\\it_api\\mo_release.exe API_TYPE=0 IN_IP="10.228.30.184" IN_DB="SFC" IN_SP="SFIS1.COPYIC" IN_EVENT="GET_MO_RELEASED" IN_DATA="{''DATE'':''14092024''}" DATE="14092024"'
+#insert into @result
+#EXEC xp_cmdshell @cmd;
+
+#select 
+#stuff(
+#	(select '' + LINE 
+#	from @result where LINE like '%":"%'
+#	for xml path('')), 1, 1, ''
+#	)
+#AS RESULT
+
+
+
+
+
+
+
